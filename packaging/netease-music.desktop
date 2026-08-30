@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=网易云音乐下载器
+Name[en]=NetEase Music Downloader
+GenericName=Music Downloader
+Comment=搜索、下载网易云音乐歌曲（含歌词与封面嵌入）
+Comment[en]=Search and download NetEase Cloud Music with lyrics and covers
+Exec=/usr/bin/netease-music
+Icon=netease-music
+Terminal=false
+Categories=AudioVideo;Audio;Network;
+Keywords=music;netease;download;音乐;下载;网易云;
+StartupNotify=true

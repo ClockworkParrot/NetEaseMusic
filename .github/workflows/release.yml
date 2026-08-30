@@ -1,0 +1,63 @@
+name: Build Packages
+
+# 手动触发，或推送 v* 标签时自动构建三平台安装包
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  deb-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装依赖
+        run: pip install -r requirements.txt pyinstaller pysocks
+      - name: 构建 deb
+        run: bash packaging/build_deb.sh "${GITHUB_REF_NAME#v}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-amd64
+          path: dist_deb/*.deb
+
+  exe-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装依赖
+        run: pip install -r requirements.txt pyinstaller pysocks
+      - name: 构建 exe
+        run: >
+          python -m PyInstaller --noconfirm --clean --noconsole --onefile
+          --name NetEaseMusic
+          --icon packaging/icon.ico
+          --hidden-import socks --hidden-import sockshandler
+          main.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exe-win64
+          path: dist/NetEaseMusic.exe
+
+  app-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装依赖
+        run: pip install -r requirements.txt pyinstaller pysocks
+      - name: 构建 .app
+        run: bash packaging/build_mac.sh
+      - name: 压缩 .app
+        run: cd dist && zip -qry NetEaseMusic-macOS.zip NetEaseMusic.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-macos
+          path: dist/NetEaseMusic-macOS.zip
