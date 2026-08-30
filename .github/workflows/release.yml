@@ -64,3 +64,24 @@ jobs:
         with:
           name: app-macos
           path: dist/NetEaseMusic-macOS.zip
+
+  # 打 tag 触发时：汇总三平台产物发布 GitHub Release
+  # （Release 附件可经镜像站加速下载，api 的 artifacts 不能）
+  release:
+    needs: [deb-linux, exe-windows, app-macos]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: 发布 Release
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "NetEase Music Downloader $GITHUB_REF_NAME" \
+            --notes "安装包：deb (Linux amd64) / exe (Windows) / zip (macOS app)" \
+            artifacts/deb-amd64/*.deb \
+            artifacts/exe-win64/*.exe \
+            artifacts/app-macos/*.zip
+        env:
+          GH_TOKEN: ${{ github.token }}
