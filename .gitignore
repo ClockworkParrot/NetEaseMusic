@@ -5,3 +5,5 @@ dist/
 dist_deb/
 .venv-build/
 *.spec
+NetEaseMusic-macOS.zip
+NetEaseMusic.exe

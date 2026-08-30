@@ -48,9 +48,10 @@ Installed-Size: ${INSTALLED_SIZE}
 Depends: libgl1, libegl1, libxkbcommon-x11-0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render-util0, libxcb-shape0, libxcb-xinerama0, libxcb-xkb1, libfontconfig1, libglib2.0-0, libgstreamer1.0-0, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good
 Maintainer: ClockworkParrot <clockworkparrot@users.noreply.github.com>
 Homepage: https://github.com/ClockworkParrot
-Description: 网易云音乐下载器（仿官方 UI）
- 支持歌单/专辑/单曲链接解析、关键词搜索、
- 多线程下载（歌词/封面嵌入）、本地试听播放。
+Description: 网易云音乐第三方客户端（仿官方 UI）
+ 支持歌单/专辑/单曲解析、关键词搜索、在线试听与多线程下载（歌词/封面嵌入）；
+ 本地音乐库扫描识别（标签/时长/内嵌封面）、自动匹配并同步滚动歌词（.lrc 字幕），
+ 可下载/保存歌词字幕。
 EOF
 
 cat > "${BUILD_DIR}/usr/bin/${APP_NAME}" <<EOF

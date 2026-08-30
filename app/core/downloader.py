@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """下载管理：QThread + 线程池，支持取消、失败重试、单文件实时进度。"""
+import os
 import re
 import threading
 import time
@@ -160,12 +161,25 @@ class DownloadManager(QThread):
             return True
 
         self._emit(song, ST_RUN, 0, "获取链接…")
-        url = api.resolve_playable_url(song.id, self.br, self.proxy, self.cookie)
-        if not url:
-            self._emit(song, ST_FAIL, 0, "无版权或需要 VIP/Cookie，无法下载")
-            return False
-
-        ok, msg = self._stream(song, url, mp3_path)
+        # 单请求流式下载：open_audio_stream 深检通过后直接复用同一响应续写，
+        # 避免 probe 与下载两次 GET 拿到不同内容（CDN 重复请求可能给占位假文件）
+        ok, msg = False, ""
+        for _ in range(1, self.retries + 1):
+            if self._cancel.is_set():
+                return False
+            resp, head_buf = api.open_audio_stream(song.id, self.br, self.proxy, self.cookie)
+            if not resp:
+                ok, msg = False, "无版权或需要 VIP/Cookie（音频可能已下架）"
+                break
+            try:
+                ok, msg = self._stream(song, resp, head_buf, mp3_path)
+            finally:
+                resp.close()
+            if ok and not self._validate_saved(mp3_path):
+                ok, msg = False, "源音频为空（歌曲可能已下架）"
+            if ok or self._cancel.is_set():
+                break
+            time.sleep(1.5)
         if not ok:
             if mp3_path.exists():
                 try:
@@ -197,43 +211,40 @@ class DownloadManager(QThread):
         self._emit(song, ST_DONE, 100, "完成")
         return True
 
-    def _stream(self, song, url, path):
-        """流式下载单文件，Content-Length 可知时每 2% 回传进度；失败按 self.retries 重试。
+    def _stream(self, song, resp, head_buf, path):
+        """单请求流式下载：先写入深检时预读的 head_buf（前 256KB，同一响应连接），
+        再继续读 resp 剩余数据。Content-Length 可知时每 2% 回传进度。"""
+        try:
+            total = int(resp.headers.get("Content-Length") or 0)
+            done, last_pct = 0, 0
+            with open(path, "wb") as f:
+                f.write(head_buf)
+                done = len(head_buf)
+                for chunk in resp.iter_content(8192):
+                    if self._cancel.is_set():
+                        return False, "已取消"
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    done += len(chunk)
+                    if total:
+                        pct = int(done * 100 / total)
+                        if pct - last_pct >= 2:
+                            last_pct = pct
+                            self._emit(song, ST_RUN, pct, f"下载中 {pct}%")
+            return True, ""
+        except Exception as e:
+            return False, str(e) or "网络错误"
 
-        首块数据先做 MP3 魔数校验（ID3 / MPEG 帧同步），防止把 404 页、
-        错误 JSON 等当音频存下来（那正是“封面嵌入不正常”的表象来源之一）。
-        """
-        import requests
-        for _ in range(1, self.retries + 1):
-            if self._cancel.is_set():
-                return False, "已取消"
-            try:
-                with requests.get(url, stream=True, timeout=20, proxies=self.proxy,
-                                  headers=api._headers(self.cookie)) as r:
-                    r.raise_for_status()
-                    total = int(r.headers.get("Content-Length") or 0)
-                    done, last_pct = 0, 0
-                    with open(path, "wb") as f:
-                        chunks = r.iter_content(8192)
-                        first = next(chunks, b"")
-                        if not api._is_audio_head(first):
-                            return False, "源返回的不是有效音频"
-                        f.write(first)
-                        done += len(first)
-                        for chunk in chunks:
-                            if self._cancel.is_set():
-                                return False, "已取消"
-                            if not chunk:
-                                continue
-                            f.write(chunk)
-                            done += len(chunk)
-                            if total:
-                                pct = int(done * 100 / total)
-                                if pct - last_pct >= 2:
-                                    last_pct = pct
-                                    self._emit(song, ST_RUN, pct, f"下载中 {pct}%")
-                return True, ""
-            except Exception:
-                if not self._cancel.is_set():
-                    time.sleep(1.5)
-        return False, "网络错误"
+    def _validate_saved(self, path):
+        """下载完成后复核文件头 256KB：拦下“合法头+全零 payload”的占位假音频
+        （probe 与下载是两次独立请求，CDN 内容可能不一致）。假文件删除并返回 False"""
+        try:
+            with open(path, "rb") as f:
+                buf = f.read(256 * 1024)
+            if api._is_audio_head(buf) and not api._audio_payload_ok(buf):
+                os.remove(path)
+                return False
+            return True
+        except Exception:
+            return True  # 校验本身出错时不误伤正常文件

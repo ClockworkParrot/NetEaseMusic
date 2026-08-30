@@ -39,6 +39,8 @@ _ICONS = {
     "cloud": '<path d="M7 18.5h10a4 4 0 0 0 .9-7.9A6 6 0 0 0 6.2 9.4 4.6 4.6 0 0 0 7 18.5z"/>',
     "plus": '<path d="M12 5.5v13M5.5 12h13"/>',
     "radio": '<circle cx="12" cy="12" r="2.2" fill="{c}" stroke="none"/><path d="M7.8 16.2a6 6 0 0 1 0-8.4M16.2 7.8a6 6 0 0 1 0 8.4M5 19a10 10 0 0 1 0-14M19 5a10 10 0 0 1 0 14"/>',
+    "refresh": '<path d="M19 12a7 7 0 1 1-2.05-4.95"/><path d="M19 3.5V8h-4.5"/>',
+    "lyrics": '<rect x="5" y="3.5" width="14" height="17" rx="2"/><path d="M8.5 8h7M8.5 11.5h7M8.5 15h4.5"/>',
 }
 
 _APP_ICON_SVG = (

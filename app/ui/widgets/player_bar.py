@@ -30,6 +30,18 @@ class _Slider(QSlider):
         self.seek_requested.emit(self.value())
 
 
+class _CoverLabel(QLabel):
+    """可点击封面：跳转到正在播放页"""
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, ev):
+        self.clicked.emit()
+
+    def enterEvent(self, ev):
+        self.setCursor(Qt.PointingHandCursor)
+        super().enterEvent(ev)
+
+
 class PlayerBar(QWidget):
     play_toggled = pyqtSignal()
     prev_clicked = pyqtSignal()
@@ -39,6 +51,7 @@ class PlayerBar(QWidget):
     mode_changed = pyqtSignal(str)          # loop / shuffle
     like_toggled = pyqtSignal(bool)
     open_downloads = pyqtSignal()
+    cover_clicked = pyqtSignal()
 
     MODES = [("loop", "列表循环"), ("shuffle", "随机播放")]
 
@@ -54,8 +67,9 @@ class PlayerBar(QWidget):
         lay.setSpacing(12)
 
         # ---- 左：封面 / 信息 / 喜欢 ----
-        self.cover = QLabel()
+        self.cover = _CoverLabel()
         self.cover.setFixedSize(44, 44)
+        self.cover.clicked.connect(self.cover_clicked.emit)
         lay.addWidget(self.cover)
 
         meta = QVBoxLayout()

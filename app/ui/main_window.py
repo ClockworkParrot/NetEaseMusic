@@ -12,7 +12,9 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
 from app.core import api
-from app.core.models import Playlist
+from app.core import lyrics as lrc_io
+from app.core import local_library
+from app.core.models import Playlist, Song
 from app.core.downloader import DownloadManager, safe_filename
 from app.core.playlist_io import export_songs, import_songs
 from app.ui.theme import build_qss, LIGHT, DARK
@@ -24,6 +26,8 @@ from app.ui.dialogs import CookieDialog, ProxyDialog
 from app.ui.pages.discover_page import DiscoverPage
 from app.ui.pages.playlist_page import PlaylistPage
 from app.ui.pages.download_page import DownloadPage
+from app.ui.pages.local_page import LocalPage
+from app.ui.pages.now_playing_page import NowPlayingPage
 
 
 class _Async(QObject):
@@ -33,7 +37,7 @@ class _Async(QObject):
 
 
 class MainWindow(QMainWindow):
-    PAGE_DISCOVER, PAGE_PLAYLIST, PAGE_DOWNLOAD = 0, 1, 2
+    PAGE_DISCOVER, PAGE_PLAYLIST, PAGE_DOWNLOAD, PAGE_LOCAL, PAGE_NOWPLAYING = 0, 1, 2, 3, 4
 
     def __init__(self, settings):
         super().__init__()
@@ -48,8 +52,11 @@ class MainWindow(QMainWindow):
         self.mode = "loop"
         self._pl_entries = []           # 侧栏歌单条目 (kind, id, title)
         self._dark = bool(settings.get("dark"))
+        self._now = None                # 正在播放上下文：kind/path/song/title/artist
+        self._lrc_plain_text = ""       # 当前歌词原文（保存字幕用）
+        self._lrc_saved_path = ""       # 已自动保存的字幕路径
 
-        self.setWindowTitle("网易云音乐下载器")
+        self.setWindowTitle("网易云音乐 · 第三方客户端")
         self.setWindowIcon(_app_icon())
         self.resize(1160, 760)
         self.setMinimumSize(960, 640)
@@ -68,6 +75,9 @@ class MainWindow(QMainWindow):
         self.download_page.set_embed(bool(self.settings.get("embed_cover", True)))
         self.titlebar.set_dark(self._dark)
         self.sidebar.set_playlists([])
+        self.now_page.set_no_track()
+        # 启动即扫描本地曲库（默认下载目录，可在本地音乐页更换）
+        self._rescan_local()
 
     # ================= UI 构建 =================
     def _build_ui(self):
@@ -92,9 +102,13 @@ class MainWindow(QMainWindow):
         self.discover = DiscoverPage()
         self.playlist_page = PlaylistPage()
         self.download_page = DownloadPage()
+        self.local_page = LocalPage()
+        self.now_page = NowPlayingPage()
         self.stack.addWidget(self.discover)
         self.stack.addWidget(self.playlist_page)
         self.stack.addWidget(self.download_page)
+        self.stack.addWidget(self.local_page)
+        self.stack.addWidget(self.now_page)
         body.addWidget(self.stack, 1)
         outer.addLayout(body, 1)
 
@@ -112,8 +126,17 @@ class MainWindow(QMainWindow):
 
         # 侧栏
         self.sidebar.navigate.connect(self._on_nav)
-        self.sidebar.open_local.connect(self._open_local_dir)
         self.sidebar.playlist_clicked.connect(self._on_sidebar_playlist)
+
+        # 本地音乐页
+        self.local_page.play_requested.connect(self._play_local_tracks)
+        self.local_page.play_all_requested.connect(self._play_local_tracks)
+        self.local_page.lrc_requested.connect(self._fetch_lrc_for_track)
+        self.local_page.dir_changed.connect(self._on_local_dir_changed)
+        self.local_page.refresh_requested.connect(lambda: self._rescan_local())
+
+        # 正在播放页
+        self.now_page.save_lrc_requested.connect(self._save_current_lrc)
 
         # 发现页
         self.discover.resolve_requested.connect(self.on_query)
@@ -146,8 +169,7 @@ class MainWindow(QMainWindow):
         self.manager.log_line.connect(self._on_manager_log)
 
         # 播放器
-        self.player.positionChanged.connect(
-            lambda pos: self.player_bar.set_position(pos, self.player.duration()))
+        self.player.positionChanged.connect(self._on_position)
         self.player.durationChanged.connect(
             lambda dur: self.player_bar.set_position(self.player.position(), dur))
         self.player.stateChanged.connect(
@@ -166,6 +188,7 @@ class MainWindow(QMainWindow):
         self.player_bar.mode_changed.connect(self._on_mode_changed)
         self.player_bar.like_toggled.connect(self._on_like_toggled)
         self.player_bar.open_downloads.connect(lambda: self._switch_page(self.PAGE_DOWNLOAD))
+        self.player_bar.cover_clicked.connect(lambda: self._switch_page(self.PAGE_NOWPLAYING))
 
     # ================= 通用 =================
     def toast(self, text, ms=2200):
@@ -192,12 +215,20 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(idx)
         if idx == self.PAGE_DOWNLOAD:
             self.sidebar.set_checked("downloads")
+        elif idx == self.PAGE_LOCAL:
+            self.sidebar.set_checked("local")
+        elif idx == self.PAGE_NOWPLAYING:
+            self.sidebar.set_checked("nowplaying")
         else:
             self.sidebar.set_checked("discover")
 
     def _on_nav(self, key):
         if key == "downloads":
             self._switch_page(self.PAGE_DOWNLOAD)
+        elif key == "local":
+            self._switch_page(self.PAGE_LOCAL)
+        elif key == "nowplaying":
+            self._switch_page(self.PAGE_NOWPLAYING)
         else:
             self._switch_page(self.PAGE_DISCOVER)
 
@@ -306,11 +337,27 @@ class MainWindow(QMainWindow):
         self.playlist_page.table.set_playing(song.id)
         self._sync_like_ui(song.id)
         self._async_cover_song(song)
+        self.now_page.set_track(song.name, song.artist)
 
+        # 本地曲库歌曲（id = "local:<文件路径>"）
+        if str(song.id).startswith("local:"):
+            path = str(song.id)[6:]
+            self._now = {"kind": "local", "path": path, "song": None,
+                         "title": song.name, "artist": song.artist}
+            self._async_local_cover(path)
+            self.player.setMedia(QMediaContent(QUrl.fromLocalFile(path)))
+            self.player.play()
+            self._load_lyrics()
+            return
+
+        self._now = {"kind": "online", "path": None, "song": song,
+                     "title": song.name, "artist": song.artist}
         local = self._local_file(song)
         if local:
+            self._now["path"] = str(local)
             self.player.setMedia(QMediaContent(QUrl.fromLocalFile(str(local))))
             self.player.play()
+            self._load_lyrics()
             return
 
         cookie = self.settings.get("cookie")
@@ -322,10 +369,16 @@ class MainWindow(QMainWindow):
 
     def _play_url(self, url):
         if not url:
-            self.toast("该歌曲无版权或需要 VIP / Cookie，无法试听（可下载后播放）", 4000)
+            self.now_page.set_lyrics([], [], hint="该歌曲无版权 / 需要 VIP / Cookie，或音频已下架")
+            self.toast("该歌曲无版权 / 需要 VIP / Cookie，或音频已下架，无法试听", 4000)
             return
         self.player.setMedia(QMediaContent(QUrl(url)))
         self.player.play()
+        self._load_lyrics()
+
+    def _on_position(self, pos):
+        self.player_bar.set_position(pos, self.player.duration())
+        self.now_page.set_position(pos)
 
     def _local_file(self, song):
         base = Path(self.settings.get("save_dir"))
@@ -338,7 +391,138 @@ class MainWindow(QMainWindow):
         def t1():
             return api.get_cover_url(song.id, proxy, cookie)
 
-        self.run_async(t1, lambda url: self._async_cover(url, self.player_bar.set_cover))
+        self.run_async(t1, lambda url: self._async_cover(url, self._on_cover_pm))
+
+    def _async_local_cover(self, path):
+        """本地歌曲：读取内嵌封面"""
+        self.run_async(lambda: local_library.read_cover_bytes(path), self._on_cover_bytes)
+
+    def _on_cover_bytes(self, data):
+        if not data:
+            return
+        pm = QPixmap()
+        if pm.loadFromData(data):
+            self._on_cover_pm(pm)
+
+    def _on_cover_pm(self, pm):
+        self.player_bar.set_cover(pm)
+        self.now_page.set_cover(pm)
+
+    # ================= 歌词（字幕） =================
+    def _load_lyrics(self):
+        now = dict(self._now or {})
+        title, artist = now.get("title", ""), now.get("artist", "")
+        self.now_page.set_track(title, artist)
+        self.now_page.set_lyrics([], [], hint="正在查找歌词…")
+        self._lrc_plain_text, self._lrc_saved_path = "", ""
+        proxy = self.settings.get("proxy")
+        cookie = self.settings.get("cookie")
+
+        def task():
+            # 1) 本地字幕识别：同名 .lrc（含 lyrics/lrc 子目录）
+            path = now.get("path")
+            if path:
+                hit = lrc_io.find_local_lrc(path)
+                if hit:
+                    return {"text": lrc_io.load_lrc_text(hit), "save": None}
+            # 2) 在线歌曲：直接按歌曲 id 取歌词，并缓存到保存目录
+            if now.get("kind") == "online" and now.get("song") is not None:
+                text = api.get_lyric(now["song"].id, proxy, cookie) or ""
+                save = (str(Path(self.settings.get("save_dir")) /
+                            f"{safe_filename(now['song'].display)}.lrc")) if text else None
+                return {"text": text, "save": save}
+            # 3) 本地曲库无字幕：按 标题+歌手 搜索网易云匹配
+            for s in (api.search_songs(f"{title} {artist}".strip(), 3, proxy, cookie) or []):
+                text = api.get_lyric(s.id, proxy, cookie) or ""
+                if text and lrc_io._TIME_TAG.search(text):
+                    save = str(Path(path).with_suffix(".lrc")) if path else None
+                    return {"text": text, "save": save}
+            return {"text": "", "save": None}
+
+        def done(res):
+            # 慢响应串台保护：结果不属于当前播放曲则丢弃
+            if self._now and (self._now.get("title"), self._now.get("artist")) != (title, artist):
+                return
+            text = (res or {}).get("text") or ""
+            save = (res or {}).get("save")
+            if not text:
+                self.now_page.set_lyrics([], [], hint="暂无歌词（纯音乐或未收录）")
+                return
+            self._lrc_plain_text = text
+            if save:  # 自动下载/缓存字幕
+                try:
+                    lrc_io.save_lrc(save, text)
+                    self._lrc_saved_path = save
+                except Exception:
+                    pass
+            timed, plain = lrc_io.parse_lrc(text)
+            self.now_page.set_lyrics(timed, plain)
+
+        self.run_async(task, done,
+                       lambda e: self.now_page.set_lyrics([], [], hint=f"歌词获取失败：{e}"))
+
+    def _save_current_lrc(self):
+        """手动保存当前歌词为 .lrc 字幕"""
+        if not self._lrc_plain_text:
+            self.toast("当前没有可保存的歌词")
+            return
+        if self._lrc_saved_path:
+            self.toast(f"字幕已在此前保存：{self._lrc_saved_path}", 3000)
+            return
+        title = (self._now or {}).get("title") or "lyrics"
+        p = lrc_io.save_lrc(Path(self.settings.get("save_dir")) /
+                            f"{safe_filename(title)}.lrc", self._lrc_plain_text)
+        self._lrc_saved_path = str(p)
+        self.toast(f"已保存字幕：{p.name}")
+
+    # ================= 本地音乐 =================
+    def _play_local_tracks(self, tracks, row=0):
+        if not tracks:
+            self.toast("本地曲库为空，请先选择目录扫描")
+            return
+        songs = [Song(id=f"local:{t.path}", name=t.title, artist=t.artist,
+                      album=t.album, duration_ms=t.duration_ms) for t in tracks]
+        self._play_context(songs, row if 0 <= row < len(songs) else 0)
+
+    def _on_local_dir_changed(self, d):
+        self.settings.set("local_dir", d)
+        self._rescan_local(d)
+
+    def _rescan_local(self, d=None):
+        d = d or self.settings.get("local_dir") or self.settings.get("save_dir")
+        self.local_page.set_dir(str(d))
+        self.toast(f"正在扫描本地音乐：{d}")
+        self.run_async(lambda: local_library.scan_directory(str(d)),
+                       self.local_page.set_tracks,
+                       lambda e: self.toast(f"扫描失败：{e}"))
+
+    def _fetch_lrc_for_track(self, track):
+        """本地曲库：为选中歌曲匹配并下载 .lrc 字幕"""
+        proxy = self.settings.get("proxy")
+        cookie = self.settings.get("cookie")
+        self.toast(f"正在为《{track.title}》匹配歌词…")
+
+        def task():
+            for s in (api.search_songs(f"{track.title} {track.artist}".strip(),
+                                       3, proxy, cookie) or []):
+                text = api.get_lyric(s.id, proxy, cookie) or ""
+                if text and lrc_io._TIME_TAG.search(text):
+                    save = str(Path(track.path).with_suffix(".lrc"))
+                    lrc_io.save_lrc(save, text)
+                    return {"path": track.path, "ok": True}
+            return {"path": track.path, "ok": False}
+
+        def done(res):
+            if res.get("ok"):
+                self.toast("歌词（字幕）已下载")
+                t = next((t for t in self.local_page.tracks if t.path == res["path"]), None)
+                if t:
+                    t.has_lrc = True
+                self.local_page.refresh_lrc_state(res["path"])
+            else:
+                self.toast("未在网易云匹配到该歌的歌词")
+
+        self.run_async(task, done)
 
     def _on_play_toggle(self):
         if self.player.state() == QMediaPlayer.PlayingState:

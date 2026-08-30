@@ -22,8 +22,7 @@ class ClickableLabel(QLabel):
 
 
 class Sidebar(QWidget):
-    navigate = pyqtSignal(str)           # "discover" / "downloads"
-    open_local = pyqtSignal()
+    navigate = pyqtSignal(str)           # "discover" / "downloads" / "local" / "nowplaying"
     playlist_clicked = pyqtSignal(str)   # 歌单 id
 
     def __init__(self, parent=None):
@@ -40,11 +39,12 @@ class Sidebar(QWidget):
         # ---- 在线音乐 ----
         lay.addWidget(self._section("在线音乐"))
         self._nav(lay, "discover", "发现音乐", "compass", True)
+        self._nav(lay, "nowplaying", "正在播放", "note", True)
 
         # ---- 我的音乐 ----
         lay.addWidget(self._section("我的音乐"))
+        self._nav(lay, "local", "本地音乐", "folder", True)
         self._nav(lay, "downloads", "下载管理", "download", True)
-        self._nav(lay, "local", "本地音乐", "folder", False)
 
         # ---- 创建的歌单（动态） ----
         lay.addWidget(self._section("创建的歌单"))
@@ -82,9 +82,6 @@ class Sidebar(QWidget):
         return btn
 
     def _on_nav(self, key):
-        if key == "local":
-            self.open_local.emit()
-            return
         self.navigate.emit(key)
 
     # ---------- 状态 ----------
