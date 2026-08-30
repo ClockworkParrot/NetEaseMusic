@@ -16,8 +16,9 @@ DEFAULT_HEADERS = {
     "Referer": "https://music.163.com/",
     "Cookie": "os=pc;",
 }
-# 直链获取失败时的兜底源
-FALLBACK_URL = "https://link.hhtjim.com/163/{sid}.mp3"
+# 直链获取失败时的兜底源：网易云官方外链（免费歌 302→真实 mp3；无版权歌 302→404 页，
+# 由 resolve_playable_url 的魔数校验兜住）。旧兜底 link.hhtjim.com 已失效(500)。
+FALLBACK_URL = "https://music.163.com/song/media/outer/url?id={sid}.mp3"
 
 QUALITY_LIST = [(128000, "标准 (128k)"), (192000, "较高 (192k)"), (320000, "极高 (320k)")]
 
@@ -135,7 +136,7 @@ def fetch_song_detail(sid, proxy=None, cookie=None):
 
 
 def get_song_url(sid, br=192000, proxy=None, cookie=None):
-    """获取播放/下载直链；VIP 资源取决于 Cookie 账号权限。失败走兜底源。"""
+    """获取播放/下载直链；VIP 资源取决于 Cookie 账号权限。失败走官方外链兜底。"""
     url = "https://music.163.com/api/song/enhance/player/url"
     params = {"ids": f"[{sid}]", "br": br}
     try:
@@ -147,6 +148,37 @@ def get_song_url(sid, br=192000, proxy=None, cookie=None):
     except Exception:
         pass
     return FALLBACK_URL.format(sid=sid)
+
+
+_MP3_MAGIC = (b"ID3",)  # 其余用 0xFFE0 掩码判断
+
+
+def _is_audio_head(head):
+    """判断响应头部字节是否为 MP3 音频（ID3 标签头或 MPEG 帧同步）"""
+    if head[:3] == b"ID3":
+        return True
+    return len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0
+
+
+def resolve_playable_url(sid, br=192000, proxy=None, cookie=None):
+    """获取【已验证】的可播放/下载直链。
+
+    请求直链（自动跟随 302）读前 4 字节校验音频魔数：
+    - 有效 → 返回最终直链（省去播放器/下载再跳一次 302）
+    - 无效（无版权歌 outer/url 会 302 到 404 HTML）→ 返回 None
+    """
+    url = get_song_url(sid, br, proxy, cookie)
+    if not url:
+        return None
+    try:
+        r = requests.get(url, headers=_headers(cookie), stream=True,
+                         timeout=15, proxies=proxy, allow_redirects=True)
+        head = r.raw.read(4, decode_content=True)
+        final, ok = r.url, _is_audio_head(head)
+        r.close()
+        return final if ok else None
+    except Exception:
+        return None
 
 
 def get_lyric(sid, proxy=None, cookie=None):

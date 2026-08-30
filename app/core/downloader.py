@@ -31,23 +31,36 @@ def safe_filename(text, max_len=80):
 
 
 def _embed_cover(mp3_path, cover_bytes, title, artist, album):
-    """通过 mutagen 将封面/标题/歌手/专辑写入 ID3 标签"""
+    """通过 mutagen 将封面/标题/歌手/专辑写入 ID3 标签。
+
+    - 只接受 JPEG/PNG 图片（其余数据播放器无法解码，直接拒绝）
+    - 以 ID3v2.3 保存：Windows 资源管理器与大多数播放器对默认的 v2.4 兼容差，
+      表现为“嵌入了但看不到封面”
+    - 返回是否成功，由调用方记录日志（不再静默吞掉失败）
+    """
+    if cover_bytes[:3] == b"\xff\xd8\xff":
+        mime = "image/jpeg"
+    elif cover_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        mime = "image/png"
+    else:
+        return False
     try:
         audio = MP3(str(mp3_path), ID3=ID3)
         try:
-            audio.add_tags()
+            audio.add_tags()   # 无标签文件补建；已存在则忽略
         except Exception:
             pass
-        audio.tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=cover_bytes))
+        audio.tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=cover_bytes))
         if title:
             audio.tags.add(TIT2(encoding=3, text=title))
         if artist:
             audio.tags.add(TPE1(encoding=3, text=artist))
         if album:
             audio.tags.add(TALB(encoding=3, text=album))
-        audio.save()
+        audio.save(v2_version=3)
+        return True
     except Exception:
-        pass
+        return False
 
 
 class DownloadManager(QThread):
@@ -147,9 +160,9 @@ class DownloadManager(QThread):
             return True
 
         self._emit(song, ST_RUN, 0, "获取链接…")
-        url = api.get_song_url(song.id, self.br, self.proxy, self.cookie)
+        url = api.resolve_playable_url(song.id, self.br, self.proxy, self.cookie)
         if not url:
-            self._emit(song, ST_FAIL, 0, "无法获取下载链接")
+            self._emit(song, ST_FAIL, 0, "无版权或需要 VIP/Cookie，无法下载")
             return False
 
         ok, msg = self._stream(song, url, mp3_path)
@@ -173,16 +186,23 @@ class DownloadManager(QThread):
         # 封面嵌入
         if self.embed_cover and HAS_MUTAGEN:
             cover_url = api.get_cover_url(song.id, self.proxy, self.cookie)
-            if cover_url:
-                data = api.download_cover_bytes(cover_url, self.proxy, self.cookie)
-                if data:
-                    _embed_cover(mp3_path, data, song.name, song.artist, song.album)
+            data = api.download_cover_bytes(cover_url, self.proxy, self.cookie) if cover_url else None
+            if data and _embed_cover(mp3_path, data, song.name, song.artist, song.album):
+                pass
+            else:
+                why = "未获取到封面链接" if not cover_url else (
+                    "封面下载失败" if not data else "文件或图片无效，嵌入被跳过")
+                self.log_line.emit(f"{song.display}: {why}", "warn")
 
         self._emit(song, ST_DONE, 100, "完成")
         return True
 
     def _stream(self, song, url, path):
-        """流式下载单文件，Content-Length 可知时每 2% 回传进度；失败按 self.retries 重试"""
+        """流式下载单文件，Content-Length 可知时每 2% 回传进度；失败按 self.retries 重试。
+
+        首块数据先做 MP3 魔数校验（ID3 / MPEG 帧同步），防止把 404 页、
+        错误 JSON 等当音频存下来（那正是“封面嵌入不正常”的表象来源之一）。
+        """
         import requests
         for _ in range(1, self.retries + 1):
             if self._cancel.is_set():
@@ -194,7 +214,13 @@ class DownloadManager(QThread):
                     total = int(r.headers.get("Content-Length") or 0)
                     done, last_pct = 0, 0
                     with open(path, "wb") as f:
-                        for chunk in r.iter_content(8192):
+                        chunks = r.iter_content(8192)
+                        first = next(chunks, b"")
+                        if not api._is_audio_head(first):
+                            return False, "源返回的不是有效音频"
+                        f.write(first)
+                        done += len(first)
+                        for chunk in chunks:
                             if self._cancel.is_set():
                                 return False, "已取消"
                             if not chunk:

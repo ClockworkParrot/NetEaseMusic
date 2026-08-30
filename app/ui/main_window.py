@@ -315,12 +315,14 @@ class MainWindow(QMainWindow):
 
         cookie = self.settings.get("cookie")
         proxy = self.settings.get("proxy")
-        self.run_async(lambda: api.get_song_url(song.id, 128000, proxy, cookie),
+        # resolve_playable_url 会跟随 302 并校验音频魔数：
+        # 返回最终直链；无版权歌（外链会 302 到 404 页）返回 None → 明确提示而不是播放器报模糊错误
+        self.run_async(lambda: api.resolve_playable_url(song.id, 128000, proxy, cookie),
                        self._play_url, lambda e: self.toast(f"获取播放链接失败：{e}"))
 
     def _play_url(self, url):
         if not url:
-            self.toast("未获取到试听链接（可能需要 VIP / Cookie），请下载后播放")
+            self.toast("该歌曲无版权或需要 VIP / Cookie，无法试听（可下载后播放）", 4000)
             return
         self.player.setMedia(QMediaContent(QUrl(url)))
         self.player.play()
