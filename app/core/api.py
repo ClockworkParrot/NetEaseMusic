@@ -16,9 +16,11 @@ DEFAULT_HEADERS = {
     "Referer": "https://music.163.com/",
     "Cookie": "os=pc;",
 }
-# 直链获取失败时的兜底源：网易云官方外链（免费歌 302→真实 mp3；无版权歌 302→404 页，
-# 由 resolve_playable_url 的魔数校验兜住）。旧兜底 link.hhtjim.com 已失效(500)。
-FALLBACK_URL = "https://music.163.com/song/media/outer/url?id={sid}.mp3"
+# 直链源（resolve_playable_url 按优先级逐个尝试，全部经魔数校验）：
+# 1. 官方 API enhance/player/url（音质/版权取决于 Cookie）
+# 2. 官方外链 outer/url（免费歌 302→真实 mp3；无版权歌 302→404 页，校验可识别）
+# 3. 第三方聚合源 link.hhtjim.com（对“API 不给非会员 url 但确有低音质试听”的歌有效；
+#    仅对真无版权的歌返回 500 JSON，同样靠校验识别）
 
 QUALITY_LIST = [(128000, "标准 (128k)"), (192000, "较高 (192k)"), (320000, "极高 (320k)")]
 
@@ -135,21 +137,6 @@ def fetch_song_detail(sid, proxy=None, cookie=None):
         return None
 
 
-def get_song_url(sid, br=192000, proxy=None, cookie=None):
-    """获取播放/下载直链；VIP 资源取决于 Cookie 账号权限。失败走官方外链兜底。"""
-    url = "https://music.163.com/api/song/enhance/player/url"
-    params = {"ids": f"[{sid}]", "br": br}
-    try:
-        data = _get(url, proxy, cookie, params=params).json()
-        if data.get("code") == 200 and data.get("data"):
-            u = data["data"][0].get("url")
-            if u:
-                return u
-    except Exception:
-        pass
-    return FALLBACK_URL.format(sid=sid)
-
-
 _MP3_MAGIC = (b"ID3",)  # 其余用 0xFFE0 掩码判断
 
 
@@ -160,16 +147,8 @@ def _is_audio_head(head):
     return len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0
 
 
-def resolve_playable_url(sid, br=192000, proxy=None, cookie=None):
-    """获取【已验证】的可播放/下载直链。
-
-    请求直链（自动跟随 302）读前 4 字节校验音频魔数：
-    - 有效 → 返回最终直链（省去播放器/下载再跳一次 302）
-    - 无效（无版权歌 outer/url 会 302 到 404 HTML）→ 返回 None
-    """
-    url = get_song_url(sid, br, proxy, cookie)
-    if not url:
-        return None
+def _probe_audio_url(url, proxy=None, cookie=None):
+    """GET url（跟随 302），首 4 字节为 MP3 魔数则返回最终直链，否则 None"""
     try:
         r = requests.get(url, headers=_headers(cookie), stream=True,
                          timeout=15, proxies=proxy, allow_redirects=True)
@@ -179,6 +158,34 @@ def resolve_playable_url(sid, br=192000, proxy=None, cookie=None):
         return final if ok else None
     except Exception:
         return None
+
+
+def resolve_playable_url(sid, br=192000, proxy=None, cookie=None):
+    """获取【已验证】的可播放/下载直链。
+
+    按优先级尝试多个直链源（见文件头注释），每个源都跟随 302 并校验
+    音频魔数，返回首个有效的最终直链；全部无效（真无版权）返回 None。
+    """
+    candidates = []
+    # 1) 官方 API 直链
+    try:
+        data = _get("https://music.163.com/api/song/enhance/player/url",
+                    proxy, cookie, params={"ids": f"[{sid}]", "br": br}).json()
+        if data.get("code") == 200 and data.get("data"):
+            u = data["data"][0].get("url")
+            if u:
+                candidates.append(u)
+    except Exception:
+        pass
+    # 2) 官方外链  3) 第三方聚合源
+    candidates.append(f"https://music.163.com/song/media/outer/url?id={sid}.mp3")
+    candidates.append(f"https://link.hhtjim.com/163/{sid}.mp3")
+
+    for cand in candidates:
+        final = _probe_audio_url(cand, proxy, cookie)
+        if final:
+            return final
+    return None
 
 
 def get_lyric(sid, proxy=None, cookie=None):
