@@ -17,7 +17,10 @@ jobs:
       - name: 安装依赖
         run: pip install -r requirements.txt pyinstaller pysocks
       - name: 构建 deb
-        run: bash packaging/build_deb.sh "${GITHUB_REF_NAME#v}"
+        # tag 触发时用 tag 名去掉 v 作版本号；分支手动触发时用默认 1.0.0
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then V="${GITHUB_REF_NAME#v}"; else V="1.0.0"; fi
+          bash packaging/build_deb.sh "$V"
       - uses: actions/upload-artifact@v4
         with:
           name: deb-amd64
