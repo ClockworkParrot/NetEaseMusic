@@ -71,6 +71,8 @@ jobs:
     needs: [deb-linux, exe-windows, app-macos]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -82,7 +84,11 @@ jobs:
             --notes "安装包：deb (Linux amd64) / exe (Windows) / zip (macOS app)" \
             artifacts/deb-amd64/*.deb \
             artifacts/exe-win64/*.exe \
-            artifacts/app-macos/*.zip
+            artifacts/app-macos/*.zip \
+          || gh release upload "$GITHUB_REF_NAME" \
+            artifacts/deb-amd64/*.deb \
+            artifacts/exe-win64/*.exe \
+            artifacts/app-macos/*.zip --clobber
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
