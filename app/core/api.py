@@ -147,27 +147,46 @@ def _is_audio_head(head):
     return len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0
 
 
+def _audio_payload_ok(buf):
+    """检查缓冲区首个 MPEG 帧的 payload 是否为真实音频。
+
+    下架歌曲在网易 CDN 上是“占位空文件”：合法 ID3 标签（真封面+真标题）+
+    合法 MPEG 帧头，但帧 payload 全零。仅看 4 字节魔数会误判为有效，
+    这里解析 ID3 长度、定位首个帧并验证 payload 非全零。
+    找不到帧（大标签/非 MP3 容器）时放行，交由上层进一步处理。
+    """
+    pos = 0
+    if buf[:3] == b"ID3" and len(buf) >= 10:
+        sz = buf[6:10]
+        pos = 10 + (((sz[0] & 0x7F) << 21) | ((sz[1] & 0x7F) << 14)
+                    | ((sz[2] & 0x7F) << 7) | (sz[3] & 0x7F))
+    for i in range(pos, min(len(buf) - 80, pos + 4096)):
+        if buf[i] == 0xFF and (buf[i + 1] & 0xE0) == 0xE0 and (buf[i + 1] & 0x06):
+            # 判定窗口取帧头后 64 字节：占位假文件整段全零；真文件即使第一帧是
+            # Xing/Info VBR 头帧（side info 可能为零），其 "Xing" 字符串也在此窗口内
+            return not all(x == 0 for x in buf[i + 4:i + 68])
+    return True
+
+
 def _probe_audio_url(url, proxy=None, cookie=None):
-    """GET url（跟随 302），首 4 字节为 MP3 魔数则返回最终直链，否则 None"""
+    """GET url（跟随 302），深检前 256KB：魔数有效且首个 MPEG 帧 payload 非全零
+    才返回最终直链，否则 None（404 页 / 占位空文件 / 网络错误）"""
     try:
         r = requests.get(url, headers=_headers(cookie), stream=True,
                          timeout=15, proxies=proxy, allow_redirects=True)
-        head = r.raw.read(4, decode_content=True)
-        final, ok = r.url, _is_audio_head(head)
+        buf = r.raw.read(256 * 1024, decode_content=True)
+        final = r.url
         r.close()
-        return final if ok else None
+        if not _is_audio_head(buf):
+            return None
+        return final if _audio_payload_ok(buf) else None
     except Exception:
         return None
 
 
-def resolve_playable_url(sid, br=192000, proxy=None, cookie=None):
-    """获取【已验证】的可播放/下载直链。
-
-    按优先级尝试多个直链源（见文件头注释），每个源都跟随 302 并校验
-    音频魔数，返回首个有效的最终直链；全部无效（真无版权）返回 None。
-    """
+def _candidate_urls(sid, br, proxy, cookie):
+    """按优先级构建直链候选列表：官方 API → 官方外链 → 第三方聚合源"""
     candidates = []
-    # 1) 官方 API 直链
     try:
         data = _get("https://music.163.com/api/song/enhance/player/url",
                     proxy, cookie, params={"ids": f"[{sid}]", "br": br}).json()
@@ -177,15 +196,40 @@ def resolve_playable_url(sid, br=192000, proxy=None, cookie=None):
                 candidates.append(u)
     except Exception:
         pass
-    # 2) 官方外链  3) 第三方聚合源
     candidates.append(f"https://music.163.com/song/media/outer/url?id={sid}.mp3")
     candidates.append(f"https://link.hhtjim.com/163/{sid}.mp3")
+    return candidates
 
-    for cand in candidates:
-        final = _probe_audio_url(cand, proxy, cookie)
-        if final:
-            return final
-    return None
+
+def open_audio_stream(sid, br=192000, proxy=None, cookie=None):
+    """打开音频流并深检前 256KB（魔数 + 首帧 payload 非全零）。
+
+    检验通过【不关闭响应】，随 (resp, head_buf) 返回，由调用方在同一连接上
+    续读剩余数据完成下载——probe 与下载必须是同一次 GET：实测 CDN 对同一
+    直链的重复请求可能返回“合法头+空音频”的占位假文件，两次请求内容不一致。
+    无可用源返回 (None, None)。
+    """
+    for cand in _candidate_urls(sid, br, proxy, cookie):
+        try:
+            r = requests.get(cand, headers=_headers(cookie), stream=True,
+                             timeout=20, proxies=proxy, allow_redirects=True)
+            buf = r.raw.read(256 * 1024, decode_content=True)
+            if _is_audio_head(buf) and _audio_payload_ok(buf):
+                return r, buf
+            r.close()
+        except Exception:
+            pass
+    return None, None
+
+
+def resolve_playable_url(sid, br=192000, proxy=None, cookie=None):
+    """获取【已验证】的可播放直链（供 QMediaPlayer 使用）。全部无效返回 None。"""
+    resp, _ = open_audio_stream(sid, br, proxy, cookie)
+    if not resp:
+        return None
+    final = resp.url
+    resp.close()
+    return final
 
 
 def get_lyric(sid, proxy=None, cookie=None):
