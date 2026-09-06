@@ -8,7 +8,7 @@ from PyQt5.QtCore import Qt, QUrl, pyqtSignal, QObject
 from PyQt5.QtGui import QPixmap, QDesktopServices
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QStackedWidget, QFileDialog, QMessageBox, QDialog,
-                             QApplication)
+                             QApplication, QLabel, QPushButton, QToolButton, QSizePolicy, QSlider)
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
 from app.core import api
@@ -18,9 +18,6 @@ from app.core.models import Playlist, Song
 from app.core.downloader import DownloadManager, safe_filename
 from app.core.playlist_io import export_songs, import_songs
 from app.ui.theme import build_qss, LIGHT, DARK
-from app.ui.widgets.sidebar import Sidebar
-from app.ui.widgets.titlebar import TitleBar
-from app.ui.widgets.player_bar import PlayerBar
 from app.ui.widgets.toast import Toast
 from app.ui.dialogs import CookieDialog, ProxyDialog
 from app.ui.pages.discover_page import DiscoverPage
@@ -28,6 +25,46 @@ from app.ui.pages.playlist_page import PlaylistPage
 from app.ui.pages.download_page import DownloadPage
 from app.ui.pages.local_page import LocalPage
 from app.ui.pages.now_playing_page import NowPlayingPage
+
+
+class _SimpleSlider(QSlider):
+    """简化的进度条滑块"""
+    seek_requested = pyqtSignal(int)
+    
+    def __init__(self, parent=None):
+        super().__init__(Qt.Horizontal, parent)
+        self._dragging = False
+    
+    def mousePressEvent(self, ev):
+        self._dragging = True
+        super().mousePressEvent(ev)
+    
+    def mouseReleaseEvent(self, ev):
+        if self._dragging:
+            self.seek_requested.emit(self.value())
+            self._dragging = False
+        super().mouseReleaseEvent(ev)
+
+    def is_dragging(self):
+        return self._dragging
+
+
+class _ClickableLabel(QLabel):
+    """可点击的标签（用于跳转到正在播放页）"""
+    clicked = pyqtSignal()
+
+    def mouseReleaseEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(ev)
+
+
+def _fmt_ms(ms):
+    """毫秒 → mm:ss"""
+    if ms is None or ms <= 0:
+        return "00:00"
+    s = int(ms) // 1000
+    return f"{s // 60:02d}:{s % 60:02d}"
 
 
 class _Async(QObject):
@@ -55,6 +92,7 @@ class MainWindow(QMainWindow):
         self._now = None                # 正在播放上下文：kind/path/song/title/artist
         self._lrc_plain_text = ""       # 当前歌词原文（保存字幕用）
         self._lrc_saved_path = ""       # 已自动保存的字幕路径
+        self._loading_lyrics = False    # 歌词加载中标志（防重复请求）
 
         self.setWindowTitle("网易云音乐 · 第三方客户端")
         self.setWindowIcon(_app_icon())
@@ -67,19 +105,186 @@ class MainWindow(QMainWindow):
         # 应用保存的偏好
         vol = int(self.settings.get("volume", 70))
         self.player.setVolume(vol)
-        self.player_bar.set_volume(vol)
+        if hasattr(self, "vol_slider"):
+            self.vol_slider.blockSignals(True)
+            self.vol_slider.setValue(vol)
+            self.vol_slider.blockSignals(False)
         self.download_page.set_dir(self.settings.get("save_dir"))
         self.download_page.set_quality(int(self.settings.get("quality", 192000)))
         self.download_page.set_workers(int(self.settings.get("workers", 3)))
         self.download_page.set_retries(int(self.settings.get("retries", 3)))
         self.download_page.set_embed(bool(self.settings.get("embed_cover", True)))
-        self.titlebar.set_dark(self._dark)
-        self.sidebar.set_playlists([])
         self.now_page.set_no_track()
         # 启动即扫描本地曲库（默认下载目录，可在本地音乐页更换）
         self._rescan_local()
 
     # ================= UI 构建 =================
+    
+    def _create_simplified_sidebar(self):
+        """创建简化的侧边栏组件"""
+        sidebar = QWidget()
+        sidebar.setObjectName("SimplifiedSidebar")
+        sidebar.setFixedWidth(200)
+        
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(10, 20, 10, 20)
+        layout.setSpacing(8)
+        
+        # 导航按钮组
+        from app.ui.icons import make_icon
+        
+        nav_items = [
+            ("discover", "发现音乐", "compass"),
+            ("local", "本地音乐", "folder"),
+            ("downloads", "下载管理", "download"),
+        ]
+        
+        self.nav_buttons = {}
+        for key, text, icon_name in nav_items:
+            btn = QPushButton(f"  {text}")
+            btn.setObjectName("SimplifiedNavItem")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setIcon(make_icon(icon_name, "#8C8C8C", 16))
+            btn.clicked.connect(lambda checked, k=key: self._on_nav(k))
+            layout.addWidget(btn)
+            self.nav_buttons[key] = btn
+        
+        layout.addStretch(1)
+        
+        # 底部设置按钮
+        settings_btn = QPushButton("  设置")
+        settings_btn.setObjectName("SimplifiedNavItem")
+        settings_btn.setCursor(Qt.PointingHandCursor)
+        settings_btn.setIcon(make_icon("settings", "#8C8C8C", 16))
+        settings_btn.clicked.connect(self._show_settings_menu)
+        layout.addWidget(settings_btn)
+        
+        return sidebar
+
+    def _show_settings_menu(self):
+        """设置弹出菜单：Cookie / 代理 / 下载目录"""
+        from PyQt5.QtWidgets import QMenu
+        from app.ui.icons import make_icon
+        btn = self.sender()
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu{background:%s;color:%s;border:1px solid %s;}"
+                           % ("#242427" if self._dark else "#FFF",
+                              "#E6E6E8" if self._dark else "#333",
+                              "#333338" if self._dark else "#EAEAEA"))
+        a_cookie = menu.addAction("设置 Cookie（VIP 试听）")
+        a_proxy = menu.addAction("设置代理")
+        a_dir = menu.addAction("打开下载目录")
+        act = menu.exec_(btn.mapToGlobal(btn.rect().topLeft()))
+        if act == a_cookie:
+            self._open_cookie()
+        elif act == a_proxy:
+            self._open_proxy()
+        elif act == a_dir:
+            self._open_local_dir()
+    
+    def _create_simplified_player_bar(self):
+        """创建简化的播放条组件"""
+        player_bar = QWidget()
+        player_bar.setObjectName("SimplifiedPlayerBar")
+        player_bar.setFixedHeight(60)
+        
+        layout = QHBoxLayout(player_bar)
+        layout.setContentsMargins(15, 5, 15, 5)
+        layout.setSpacing(15)
+        
+        # 播放控制按钮
+        controls = QHBoxLayout()
+        controls.setSpacing(8)
+        
+        from app.ui.icons import make_icon
+        
+        prev_btn = QToolButton()
+        prev_btn.setIcon(make_icon("prev", "#8C8C8C", 18))
+        prev_btn.setCursor(Qt.PointingHandCursor)
+        prev_btn.clicked.connect(self._prev)
+        controls.addWidget(prev_btn)
+        
+        self.play_btn = QToolButton()
+        self.play_btn.setIcon(make_icon("play", "#EC4141", 20))
+        self.play_btn.setCursor(Qt.PointingHandCursor)
+        self.play_btn.clicked.connect(self._toggle_play)
+        controls.addWidget(self.play_btn)
+        
+        next_btn = QToolButton()
+        next_btn.setIcon(make_icon("next", "#8C8C8C", 18))
+        next_btn.setCursor(Qt.PointingHandCursor)
+        next_btn.clicked.connect(self._next)
+        controls.addWidget(next_btn)
+        
+        layout.addLayout(controls)
+        
+        # 歌曲信息（点击歌曲标题可进入正在播放页）
+        info = QVBoxLayout()
+        info.setSpacing(2)
+        self.song_title = _ClickableLabel("未播放")
+        self.song_title.setObjectName("SimplifiedSongTitle")
+        self.song_title.setCursor(Qt.PointingHandCursor)
+        self.song_title.clicked.connect(lambda: self._switch_page(self.PAGE_NOWPLAYING))
+        self.song_artist = QLabel("")
+        self.song_artist.setObjectName("SimplifiedSongArtist")
+        info.addWidget(self.song_title)
+        info.addWidget(self.song_artist)
+        layout.addLayout(info, 1)
+
+        # 歌词按钮（进入正在播放页）
+        lrc_btn = QToolButton()
+        lrc_btn.setObjectName("ThemeButton")
+        lrc_btn.setIcon(make_icon("lyrics", "#8C8C8C", 18))
+        lrc_btn.setCursor(Qt.PointingHandCursor)
+        lrc_btn.setToolTip("正在播放 / 歌词")
+        lrc_btn.clicked.connect(lambda: self._switch_page(self.PAGE_NOWPLAYING))
+        layout.addWidget(lrc_btn)
+        
+        # 时间 + 进度条
+        self.time_cur = QLabel("00:00")
+        self.time_cur.setObjectName("SimplifiedSongArtist")
+        self.time_tot = QLabel("00:00")
+        self.time_tot.setObjectName("SimplifiedSongArtist")
+        self.progress_slider = _SimpleSlider()
+        self.progress_slider.setMinimumWidth(160)
+        self.progress_slider.setFixedHeight(20)
+        self.progress_slider.seek_requested.connect(self.player.setPosition)
+        layout.addWidget(self.time_cur)
+        layout.addWidget(self.progress_slider, 1)
+        layout.addWidget(self.time_tot)
+
+        # 音量
+        vol_icon = QToolButton()
+        vol_icon.setObjectName("ThemeButton")
+        vol_icon.setIcon(make_icon("volume", "#8C8C8C", 16))
+        vol_icon.setCursor(Qt.PointingHandCursor)
+        layout.addWidget(vol_icon)
+        self.vol_slider = QSlider(Qt.Horizontal)
+        self.vol_slider.setFixedWidth(80)
+        self.vol_slider.setRange(0, 100)
+        self.vol_slider.setValue(70)
+        self.vol_slider.valueChanged.connect(self.player.setVolume)
+        layout.addWidget(self.vol_slider)
+
+        return player_bar
+    
+    def _get_theme_icon(self):
+        """根据当前主题获取对应的图标"""
+        from app.ui.icons import make_icon
+        icon_name = "sun" if self._dark else "moon"
+        color = "#E6E6E8" if self._dark else "#333333"
+        return make_icon(icon_name, color, 16)
+    
+    def _toggle_theme(self):
+        """切换深色/浅色主题"""
+        self._dark = not self._dark
+        self.settings.set("dark", self._dark)
+        QApplication.instance().setStyleSheet(build_qss(DARK if self._dark else LIGHT))
+        # 更新主题按钮图标
+        if hasattr(self, "theme_btn"):
+            self.theme_btn.setIcon(self._get_theme_icon())
+
     def _build_ui(self):
         root = QWidget()
         root.setObjectName("Root")
@@ -88,46 +293,75 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        self.titlebar = TitleBar()
-        outer.addWidget(self.titlebar)
+        # 新顶部栏：应用标题 + 搜索框占位符 + 主题切换
+        top_bar = QHBoxLayout()
+        top_bar.setContentsMargins(15, 10, 15, 10)
+        top_bar.setSpacing(15)
+        
+        # 应用标题
+        title_label = QLabel("网易云音乐")
+        title_label.setObjectName("AppTitle")
+        title_label.setStyleSheet("color: #EC4141; font-size: 16px; font-weight: bold;")
+        top_bar.addWidget(title_label)
+        
+        # 搜索框
+        from PyQt5.QtWidgets import QLineEdit
+        self.search_input = QLineEdit()
+        self.search_input.setObjectName("SearchInput")
+        self.search_input.setPlaceholderText("搜索音乐 / 歌单 / 歌手…")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.setMinimumHeight(34)
+        self.search_input.returnPressed.connect(
+            lambda: self.on_query(self.search_input.text().strip()))
+        top_bar.addWidget(self.search_input, 1)
+        
+        # 主题切换按钮
+        self.theme_btn = QToolButton()
+        self.theme_btn.setObjectName("ThemeButton")
+        self.theme_btn.setCursor(Qt.PointingHandCursor)
+        self.theme_btn.clicked.connect(self._toggle_theme)
+        self.theme_btn.setIcon(self._get_theme_icon())
+        top_bar.addWidget(self.theme_btn)
+        
+        outer.addLayout(top_bar)
 
+        # 主体布局：左侧边栏 + 主内容区
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
 
-        self.sidebar = Sidebar()
+        # 使用简化的侧边栏
+        self.sidebar = self._create_simplified_sidebar()
         body.addWidget(self.sidebar)
 
+        # 主内容区域
         self.stack = QStackedWidget()
+        self.stack.setObjectName("MainContent")
+        
+        # 创建页面
         self.discover = DiscoverPage()
         self.playlist_page = PlaylistPage()
         self.download_page = DownloadPage()
         self.local_page = LocalPage()
         self.now_page = NowPlayingPage()
-        self.stack.addWidget(self.discover)
-        self.stack.addWidget(self.playlist_page)
-        self.stack.addWidget(self.download_page)
-        self.stack.addWidget(self.local_page)
+        
+        # 添加页面到堆栈（顺序必须匹配 PAGE_* 常量）
+        self.stack.addWidget(self.discover)        # 0 PAGE_DISCOVER
+        self.stack.addWidget(self.playlist_page)   # 1 PAGE_PLAYLIST
+        self.stack.addWidget(self.download_page)   # 2 PAGE_DOWNLOAD
+        self.stack.addWidget(self.local_page)      # 3 PAGE_LOCAL
         self.stack.addWidget(self.now_page)
+        
         body.addWidget(self.stack, 1)
         outer.addLayout(body, 1)
 
-        self.player_bar = PlayerBar()
+        # 使用简化的播放条
+        self.player_bar = self._create_simplified_player_bar()
         outer.addWidget(self.player_bar)
 
         self.toast_tip = Toast(root)
 
     def _connect(self):
-        # 顶栏
-        self.titlebar.search_submitted.connect(self.on_query)
-        self.titlebar.theme_toggled.connect(self._toggle_theme)
-        self.titlebar.cookie_requested.connect(self._open_cookie)
-        self.titlebar.proxy_requested.connect(self._open_proxy)
-
-        # 侧栏
-        self.sidebar.navigate.connect(self._on_nav)
-        self.sidebar.playlist_clicked.connect(self._on_sidebar_playlist)
-
         # 本地音乐页
         self.local_page.play_requested.connect(self._play_local_tracks)
         self.local_page.play_all_requested.connect(self._play_local_tracks)
@@ -170,25 +404,11 @@ class MainWindow(QMainWindow):
 
         # 播放器
         self.player.positionChanged.connect(self._on_position)
-        self.player.durationChanged.connect(
-            lambda dur: self.player_bar.set_position(self.player.position(), dur))
         self.player.stateChanged.connect(
-            lambda st: self.player_bar.set_playing(st == QMediaPlayer.PlayingState))
+            lambda st: self._update_play_button_state(st == QMediaPlayer.PlayingState))
         self.player.mediaStatusChanged.connect(self._on_media_status)
         self.player.error.connect(self._on_player_error)
-
-        # 播放条
-        self.player_bar.play_toggled.connect(self._on_play_toggle)
-        self.player_bar.prev_clicked.connect(lambda: self._step(-1))
-        self.player_bar.next_clicked.connect(lambda: self._step(1))
-        self.player_bar.seek_requested.connect(self.player.setPosition)
-        self.player_bar.volume_changed.connect(self.player.setVolume)
-        self.player_bar.volume.sliderReleased.connect(
-            lambda: self.settings.set("volume", self.player_bar.volume.value()))
-        self.player_bar.mode_changed.connect(self._on_mode_changed)
-        self.player_bar.like_toggled.connect(self._on_like_toggled)
-        self.player_bar.open_downloads.connect(lambda: self._switch_page(self.PAGE_DOWNLOAD))
-        self.player_bar.cover_clicked.connect(lambda: self._switch_page(self.PAGE_NOWPLAYING))
+        self.player.durationChanged.connect(self._on_duration_changed)
 
     # ================= 通用 =================
     def toast(self, text, ms=2200):
@@ -212,17 +432,33 @@ class MainWindow(QMainWindow):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _switch_page(self, idx):
+        """切换主内容页面"""
         self.stack.setCurrentIndex(idx)
-        if idx == self.PAGE_DOWNLOAD:
-            self.sidebar.set_checked("downloads")
-        elif idx == self.PAGE_LOCAL:
-            self.sidebar.set_checked("local")
-        elif idx == self.PAGE_NOWPLAYING:
-            self.sidebar.set_checked("nowplaying")
-        else:
-            self.sidebar.set_checked("discover")
+        
+        # 更新导航按钮状态
+        if hasattr(self, 'nav_buttons'):
+            nav_key = None
+            if idx == self.PAGE_DOWNLOAD:
+                nav_key = "downloads"
+            elif idx == self.PAGE_LOCAL:
+                nav_key = "local"
+            elif idx == self.PAGE_NOWPLAYING:
+                nav_key = "nowplaying"
+            else:
+                nav_key = "discover"
+            
+            # 更新按钮状态（使用新逻辑）
+            for key, btn in self.nav_buttons.items():
+                btn.setChecked(key == nav_key)
 
     def _on_nav(self, key):
+        """处理导航点击"""
+        # 更新导航按钮状态
+        if hasattr(self, 'nav_buttons'):
+            for nav_key, btn in self.nav_buttons.items():
+                btn.setChecked(nav_key == key)
+        
+        # 切换页面
         if key == "downloads":
             self._switch_page(self.PAGE_DOWNLOAD)
         elif key == "local":
@@ -286,7 +522,7 @@ class MainWindow(QMainWindow):
         entry = (pl.kind, str(pl.id), pl.title)
         if entry not in self._pl_entries:
             self._pl_entries.append(entry)
-            self.sidebar.set_playlists([(e[1], e[2]) for e in self._pl_entries])
+            # 简化侧栏不含歌单条目列表
         self._async_cover(pl.cover_url, self.playlist_page.set_cover)
         self._switch_page(self.PAGE_PLAYLIST)
 
@@ -332,7 +568,11 @@ class MainWindow(QMainWindow):
         if not self.play_songs or not (0 <= self.play_index < len(self.play_songs)):
             return
         song = self.play_songs[self.play_index]
-        self.player_bar.set_song(song)
+        
+        # 更新简化播放条的歌曲信息
+        self.song_title.setText(song.name)
+        self.song_artist.setText(song.artist)
+        
         self.discover.table.set_playing(song.id)
         self.playlist_page.table.set_playing(song.id)
         self._sync_like_ui(song.id)
@@ -376,8 +616,46 @@ class MainWindow(QMainWindow):
         self.player.play()
         self._load_lyrics()
 
+    # ================= 播放器回调 =================
+    
+    def _update_play_button_state(self, is_playing):
+        """更新播放按钮状态"""
+        from app.ui.icons import make_icon
+        icon_name = "pause" if is_playing else "play"
+        self.play_btn.setIcon(make_icon(icon_name, "#EC4141", 20))
+    
+    def _toggle_play(self):
+        """切换播放/暂停"""
+        if self.player.state() == QMediaPlayer.PlayingState:
+            self.player.pause()
+        else:
+            self.player.play()
+    
+    def _prev(self):
+        """上一首"""
+        self._step(-1)
+    
+    def _next(self):
+        """下一首"""
+        self._step(1)
+    
+    def _on_duration_changed(self, duration):
+        """处理时长变化"""
+        if duration > 0:
+            self.progress_slider.setRange(0, duration)
+            self.progress_slider.setEnabled(True)
+            self.time_tot.setText(_fmt_ms(duration))
+        else:
+            self.progress_slider.setEnabled(False)
+            self.time_tot.setText("00:00")
+
     def _on_position(self, pos):
-        self.player_bar.set_position(pos, self.player.duration())
+        if hasattr(self, 'progress_slider'):
+            if not self.progress_slider.is_dragging():
+                self.progress_slider.blockSignals(True)
+                self.progress_slider.setValue(pos)
+                self.progress_slider.blockSignals(False)
+            self.time_cur.setText(_fmt_ms(pos))
         self.now_page.set_position(pos)
 
     def _local_file(self, song):
@@ -405,16 +683,18 @@ class MainWindow(QMainWindow):
             self._on_cover_pm(pm)
 
     def _on_cover_pm(self, pm):
-        self.player_bar.set_cover(pm)
         self.now_page.set_cover(pm)
 
     # ================= 歌词（字幕） =================
     def _load_lyrics(self):
+        if self._loading_lyrics:
+            return
         now = dict(self._now or {})
         title, artist = now.get("title", ""), now.get("artist", "")
         self.now_page.set_track(title, artist)
         self.now_page.set_lyrics([], [], hint="正在查找歌词…")
-        self._lrc_plain_text, self._lrc_saved_path = "", ""
+        self._lrc_plain_text, self._lrc_saved_path = ""
+        self._loading_lyrics = True
         proxy = self.settings.get("proxy")
         cookie = self.settings.get("cookie")
 
@@ -442,11 +722,13 @@ class MainWindow(QMainWindow):
         def done(res):
             # 慢响应串台保护：结果不属于当前播放曲则丢弃
             if self._now and (self._now.get("title"), self._now.get("artist")) != (title, artist):
+                self._loading_lyrics = False
                 return
             text = (res or {}).get("text") or ""
             save = (res or {}).get("save")
             if not text:
                 self.now_page.set_lyrics([], [], hint="暂无歌词（纯音乐或未收录）")
+                self._loading_lyrics = False
                 return
             self._lrc_plain_text = text
             if save:  # 自动下载/缓存字幕
@@ -457,9 +739,13 @@ class MainWindow(QMainWindow):
                     pass
             timed, plain = lrc_io.parse_lrc(text)
             self.now_page.set_lyrics(timed, plain)
+            self._loading_lyrics = False
 
-        self.run_async(task, done,
-                       lambda e: self.now_page.set_lyrics([], [], hint=f"歌词获取失败：{e}"))
+        def error_handler(e):
+            self.now_page.set_lyrics([], [], hint=f"歌词获取失败：{e}")
+            self._loading_lyrics = False
+
+        self.run_async(task, done, error_handler)
 
     def _save_current_lrc(self):
         """手动保存当前歌词为 .lrc 字幕"""
@@ -570,7 +856,8 @@ class MainWindow(QMainWindow):
 
     def _sync_like_ui(self, song_id):
         liked = str(song_id) in [str(x) for x in self.settings.get("liked", [])]
-        self.player_bar.set_liked(liked)
+        # 简化播放条不含喜欢按钮
+        return
 
     def _on_like_toggled(self, liked):
         if not (0 <= self.play_index < len(self.play_songs)):
@@ -659,11 +946,6 @@ class MainWindow(QMainWindow):
             self.settings.set("proxy", p)
             self.toast("代理已启用" if p else "代理已禁用")
 
-    def _toggle_theme(self):
-        self._dark = not self._dark
-        QApplication.instance().setStyleSheet(build_qss(DARK if self._dark else LIGHT))
-        self.settings.set("dark", self._dark)
-        self.titlebar.set_dark(self._dark)
 
     def _open_local_dir(self):
         p = Path(self.settings.get("save_dir"))

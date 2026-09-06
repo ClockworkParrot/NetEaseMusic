@@ -232,6 +232,30 @@ QMessageBox QPushButton {{
 QMessageBox QPushButton:hover {{ color: {c['accent']}; border-color: {c['accent']}; }}
 QFileDialog {{ background: {c['bg']}; }}
 
+/* ---------- 新UI组件 ---------- */
+#AppTitle {{ color: {c['text']}; font-size: 16px; font-weight: bold; background: transparent; }}
+#SearchInput {{ background: {c['bg_input']}; color: {c['text']}; border: 1px solid {c['border']}; border-radius: 17px; padding: 4px 14px; font-size: 13px; }}
+#SearchInput:focus {{ border-color: {c['accent']}; }}
+QLineEdit#SearchInput QToolButton {{ background: transparent; }}
+#ThemeButton {{ background: transparent; border: none; border-radius: 14px; padding: 5px; }}
+#ThemeButton:hover {{ background: {c['hover']}; }}
+#SimplifiedSidebar {{ background: {c['bg_side']}; border-right: 1px solid {c['border']}; }}
+#SimplifiedNavItem {{
+    color: {c['text_sub']}; font-size: 13px; padding: 8px 12px; border-radius: 8px;
+    background: transparent; border: none; text-align: left;
+}}
+#SimplifiedNavItem:hover {{ background: {c['hover']}; color: {c['text']}; }}
+#SimplifiedNavItem:checked {{ background: {c['accent_soft']}; color: {c['accent']}; font-weight: 600; }}
+#SimplifiedPlayerBar {{ background: {c['bar']}; border-top: 1px solid {c['border']}; }}
+#SimplifiedSongTitle {{ color: {c['text']}; font-size: 13px; font-weight: 600; background: transparent; }}
+#SimplifiedSongArtist {{ color: {c['text_sub']}; font-size: 11px; background: transparent; }}
+#LyricScroll {{ background: {c['bg']}; border: none; }}
+#LyricHost {{ background: {c['bg']}; }}
+QSlider {{ background: transparent; }}
+QSlider::groove:horizontal {{ height: 4px; background: {c['border']}; border-radius: 2px; }}
+QSlider::sub-page:horizontal {{ background: {c['accent']}; border-radius: 2px; }}
+QSlider::handle:horizontal {{ width: 12px; height: 12px; margin: -5px 0; background: {c['accent']}; border-radius: 6px; border: none; }}
+
 /* ---------- 对话框 ---------- */
 #DialogTitle {{ color: {c['text']}; font-size: 14px; font-weight: bold; background: transparent; }}
 #FieldLabel {{ color: {c['text_sub']}; font-size: 12px; background: transparent; }}

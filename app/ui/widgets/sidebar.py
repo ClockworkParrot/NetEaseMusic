@@ -31,6 +31,8 @@ class Sidebar(QWidget):
         self.setFixedWidth(208)
         self._items = {}       # key -> (btn, icon)
         self._pl_labels = []
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 10, 0, 12)
@@ -73,9 +75,11 @@ class Sidebar(QWidget):
         btn.setCheckable(checkable)
         btn.setCursor(Qt.PointingHandCursor)
         btn.setIcon(make_icon(icon, _NAV_COLOR, 17))
-        btn.clicked.connect(lambda checked: self._on_nav(key))
+        # 使用 functools.partial 避免闭包问题
+        from functools import partial
+        btn.clicked.connect(partial(self._on_nav, key))
         if checkable:
-            btn.toggled.connect(lambda on: btn.setIcon(
+            btn.toggled.connect(lambda on, k=key: btn.setIcon(
                 make_icon(icon, _NAV_ACTIVE if on else _NAV_COLOR, 17)))
         lay.addWidget(btn)
         self._items[key] = btn
@@ -87,9 +91,17 @@ class Sidebar(QWidget):
     # ---------- 状态 ----------
     def set_checked(self, key):
         """程序化选中导航项（不触发信号）"""
+        # 先取消所有导航按钮的选中状态
+        for k, btn in self._items.items():
+            # 检查是否是导航按钮（通过 key 判断，因为导航按钮的 key 是固定的）
+            if k in ["discover", "nowplaying", "local", "downloads"]:
+                btn.setChecked(False)
+        # 选中指定的按钮
         btn = self._items.get(key)
         if btn:
             btn.setChecked(True)
+            # 确保按钮被正确渲染
+            btn.update()
 
     def set_playlists(self, playlists):
         """刷新“创建的歌单”列表：playlists = [(id, title), ...]"""
