@@ -29,6 +29,7 @@ class DownloadPage(QWidget):
         self.setObjectName("Page")
         self._bars = {}        # song_id -> QProgressBar
         self._rows = {}        # song_id -> 行号
+        self._states = {}      # song_id -> 状态键（用于汇总总进度）
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(20, 16, 20, 16)
@@ -213,6 +214,7 @@ class DownloadPage(QWidget):
         """重建任务列表"""
         self._bars.clear()
         self._rows.clear()
+        self._states.clear()
         self.table.setRowCount(len(songs))
         for row, s in enumerate(songs):
             self._rows[str(s.id)] = row
@@ -245,6 +247,7 @@ class DownloadPage(QWidget):
         st = self.table.item(row, 3)
         st.setText(STATE_TEXT.get(state, state))
         st.setForeground(QColor(STATE_COLOR.get(state, _GRAY)))
+        self._states[str(song_id)] = state
 
         # 进度列：运行中用进度条控件，其余还原为文本
         if state == "run":
@@ -265,17 +268,13 @@ class DownloadPage(QWidget):
         self.table.setItem(row, 5, QTableWidgetItem(msg))
         self._refresh_overall()
 
-    def _finished_count(self):
-        n = 0
-        for row in range(self.table.rowCount()):
-            it = self.table.item(row, 3)
-            if it and it.text() in ("已完成", "已存在", "失败"):
-                n += 1
-        return n
-
     def _refresh_overall(self):
-        total = max(self.table.rowCount(), 1)
-        self.progress.setValue(self._finished_count() * 100 // total)
+        """总进度 = 终态行数 / 总行数；状态已在 _states 中缓存，避免逐行读单元格"""
+        if not self._states:
+            self.progress.setValue(0)
+            return
+        done = sum(1 for s in self._states.values() if s in ("done", "exists", "fail"))
+        self.progress.setValue(done * 100 // len(self._states))
 
     def set_status(self, text):
         self.status.setText(text)

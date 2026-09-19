@@ -26,9 +26,10 @@ def safe_filename(text, max_len=80):
     """将歌曲名转换为安全的文件名（Windows 非法字符替换）"""
     text = re.sub(r'[\\/*"<>|]', " ", text)
     text = text.replace(":", "：").replace("?", "？").replace("\n", " ").replace("\r", " ")
+    text = text.strip()
     if len(text) > max_len:
-        text = text[:max_len] + "…"
-    return text.strip()
+        text = text[:max_len].rstrip() + "…"
+    return text
 
 
 def _embed_cover(mp3_path, cover_bytes, title, artist, album):

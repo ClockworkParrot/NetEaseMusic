@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtGui import QColor, QDesktopServices
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QLineEdit, QTableWidget,
                              QTableWidgetItem, QMenu, QFileDialog)
@@ -139,7 +139,7 @@ class LocalPage(QWidget):
             it = self._item(t.title)
             it.setData(Qt.UserRole, t.path)
             tb.setItem(row, 1, it)
-            tb.setItem(row, 2, self._item(t.artist or "未知歌手"))
+            tb.setItem(row, 2, self._item(t.artist or "未知歌手", _GRAY))
             tb.setItem(row, 3, self._item(t.album or ""))
             tb.setItem(row, 4, self._item(t.duration_text, _GRAY, align=Qt.AlignCenter))
             self._set_lrc_cell(row, t.has_lrc)
@@ -150,7 +150,7 @@ class LocalPage(QWidget):
     def _item(text, color=None, align=None):
         it = QTableWidgetItem(text)
         if color:
-            it.setForeground(Qt.gray)
+            it.setForeground(QColor(color))
         if align:
             it.setTextAlignment(align | Qt.AlignVCenter)
         return it

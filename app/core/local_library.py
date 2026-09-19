@@ -37,8 +37,15 @@ class LocalTrack:
 
 
 def read_track(p):
-    """识别单个音频文件：优先 mutagen 标签，缺标签时按 '歌手 - 歌名' 文件名解析"""
+    """识别单个音频文件：优先 mutagen 标签，缺标签时按 '歌手 - 歌名' 文件名解析。
+    不存在或零字节（未下载完/已删除）的文件不入曲库。"""
     p = Path(p)
+    try:
+        size = p.stat().st_size
+    except OSError:
+        return None
+    if size == 0:
+        return None
     title, artist, album = p.stem, "", ""
     if " - " in p.stem:
         a, _, b = p.stem.partition(" - ")
@@ -49,6 +56,9 @@ def read_track(p):
             mf = MutagenFile(str(p), easy=True)
             if mf is not None:
                 duration_ms = int(getattr(mf.info, "length", 0) * 1000)
+                if duration_ms <= 0:
+                    # 仅头部的残缺文件（ID3-only、零帧 mp3 等）无法播放，不入曲库
+                    return None
 
                 def g(tag):
                     v = (mf.get(tag) or [""])[0]
@@ -58,29 +68,55 @@ def read_track(p):
                 artist = g("artist") or artist
                 album = g("album") or album
         except Exception:
-            pass
+            return None
     if not title:
         return None
-    try:
-        size = p.stat().st_size
-    except OSError:
-        size = 0
     return LocalTrack(str(p), title, artist, album, duration_ms, size)
 
 
 def read_cover_bytes(path):
-    """读取音频文件内嵌封面（ID3 APIC 等）的二进制数据，无则 None"""
+    """读取音频文件内嵌封面的二进制数据，无则 None。
+    支持 ID3 APIC(mp3) / FLAC METADATA_BLOCK_PICTURE / MP4 covr(m4a)。"""
     if not HAS_MUTAGEN:
         return None
     try:
+        import base64
         mf = MutagenFile(str(path))
-        if mf is None or not mf.tags:
+        if mf is None or not getattr(mf, "tags", None):
             return None
-        pics = mf.tags.getall("APIC")
-        if pics:
-            return pics[0].data
-        pics = mf.tags.getall("METADATA_BLOCK_PICTURE")  # flac
-        return pics[0].data if pics else None
+        # ID3（mp3）：APIC 帧
+        try:
+            pics = mf.tags.getall("APIC")
+            if pics:
+                return pics[0].data
+        except Exception:
+            pass
+        # FLAC：优先用高层 pictures()，失败则解码 base64 的 METADATA_BLOCK_PICTURE
+        try:
+            pics = getattr(mf, "pictures", None)
+            if callable(pics):
+                plist = pics()
+                if plist:
+                    return plist[0].data
+        except Exception:
+            pass
+        try:
+            raw = mf.tags.getall("METADATA_BLOCK_PICTURE")
+            if raw:
+                from mutagen.flac import Picture
+                pic = Picture(base64.b64decode(raw[0] if isinstance(raw[0], str)
+                                                else raw[0]))
+                return pic.data
+        except Exception:
+            pass
+        # MP4（m4a/mp4）：covr atom
+        try:
+            covr = mf.tags.get("covr")
+            if covr:
+                return bytes(covr[0])
+        except Exception:
+            pass
+        return None
     except Exception:
         return None
 

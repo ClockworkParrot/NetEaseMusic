@@ -693,7 +693,7 @@ class MainWindow(QMainWindow):
         title, artist = now.get("title", ""), now.get("artist", "")
         self.now_page.set_track(title, artist)
         self.now_page.set_lyrics([], [], hint="正在查找歌词…")
-        self._lrc_plain_text, self._lrc_saved_path = ""
+        self._lrc_plain_text, self._lrc_saved_path = "", ""
         self._loading_lyrics = True
         proxy = self.settings.get("proxy")
         cookie = self.settings.get("cookie")
@@ -996,7 +996,6 @@ class MainWindow(QMainWindow):
                 return
             self.manager.cancel()
             self.manager.wait(3000)
-        self.settings.save()
         ev.accept()
 
 
