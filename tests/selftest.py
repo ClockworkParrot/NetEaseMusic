@@ -785,6 +785,15 @@ def test_discover_and_dialogs(app):
     dp.download_requested.emit([])
     ok("发现页 下载选中(空)", got == [(2, "1"), 0], got)
 
+    # 断开所有信号连接，防止残留连接在测试结束前跨线程 emit
+    try:
+        dp.resolve_requested.disconnect()
+        dp.play_all_requested.disconnect()
+        dp.download_requested.disconnect()
+        dp.link_input.returnPressed.disconnect()
+    except Exception:
+        pass
+
     # ---- SongTable ----
     st = SongTable()
     st.set_songs(songs)
@@ -863,6 +872,18 @@ def test_discover_and_dialogs(app):
     # 关闭
     pd.enable.setChecked(False)
     ok("代理对话框 关闭后忽略其他字段", pd.get_proxy_dict() is None)
+
+    # 显式销毁 widgets + 排空事件队列，避免 main() 返回时残留 Qt 对象触发
+    # macos/ubuntu-py3.12 上的 process-exit 阶段段错误
+    for obj in (dp, st, cd, cd2, pd):
+        try:
+            obj.deleteLater()
+        except Exception:
+            pass
+    try:
+        app.processEvents()
+    except Exception:
+        pass
 
 
 def test_api_url_parse_more():
