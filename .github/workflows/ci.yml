@@ -7,33 +7,49 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   selftest:
-    name: 306-assertion selftest (${{ matrix.os }} / py${{ matrix.python-version }})
+    name: selftest (${{ matrix.os }} / py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ['3.10', '3.12']
+        exclude:
+          # macOS py3.12 上 PyQt5.QtMultimedia 段错误；仅跑 3.10
+          - os: macos-latest
+            python-version: '3.12'
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
 
+      # Linux: QtMultimedia 离屏所需系统库
       - name: Install system deps (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            python3-dev libgl1-mesa-dev libgstreamer1.0-0 \
-            gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+            python3-dev \
+            libgl1 libgl1-mesa-dev libglib2.0-0 \
+            libpulse0 libpulse-mainloop-glib0 \
+            libgstreamer1.0-0 gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
 
+      # macOS: gstreamer + ffmpeg (PyQt5.QtMultimedia 需要)
       - name: Install system deps (macOS)
         if: runner.os == 'macOS'
-        run: brew install gstreamer || true
+        run: |
+          brew install gstreamer ffmpeg || true
 
       - name: Install Python deps
         run: |
@@ -44,4 +60,6 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
           PYTHONDONTWRITEBYTECODE: '1'
+          # Windows 默认 cp1252 无法输出中文，强制 UTF-8
+          PYTHONIOENCODING: utf-8
         run: python tests/selftest.py
