@@ -58,17 +58,18 @@ def parse_music_url(text):
     """解析输入文本 → (kind, id)。
 
     支持: playlist/album/song 链接、?id= 链接、纯数字 ID（按单曲处理）。
-    无法识别返回 (None, None)。
+    无法识别返回 (None, None)。大小写不敏感。
     """
     t = (text or "").strip().replace("/#/", "/").replace("/#", "/")
-    m = re.search(r"(playlist|album|song)[=/](\d+)", t)
+    tl = t.lower()
+    m = re.search(r"(playlist|album|song)[=/](\d+)", tl)
     if m:
         return m.group(1), m.group(2)
-    m = re.search(r"[?&]id=(\d+)", t)
+    m = re.search(r"[?&]id=(\d+)", tl)
     if m:
-        if "album" in t:
+        if "album" in tl:
             return "album", m.group(1)
-        if "song" in t:
+        if "song" in tl:
             return "song", m.group(1)
         return "playlist", m.group(1)
     if re.fullmatch(r"\d+", t):

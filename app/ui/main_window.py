@@ -948,12 +948,17 @@ class MainWindow(QMainWindow):
 
 
     def _open_local_dir(self):
-        p = Path(self.settings.get("save_dir"))
+        d = self.settings.get("local_dir") or self.settings.get("save_dir")
+        p = Path(d)
         try:
             p.mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
+        try:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
+        except Exception:
+            # 离屏/无桌面环境或 openDocument 未实现时静默降级
+            self.toast(f"本地音乐目录：{p}")
 
     def _export_playlist(self):
         if not self.playlist or not self.playlist.songs:
