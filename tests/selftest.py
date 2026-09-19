@@ -1039,8 +1039,14 @@ def test_player_boundary():
         # closeEvent 直接触发
         ok("closeEvent 不崩", (w.close(), True)[1])
     finally:
-        if w.isVisible():
-            w.close()
+        try:
+            w.deleteLater()
+        except Exception:
+            pass
+        try:
+            app.processEvents()
+        except Exception:
+            pass
 
 
 def main():
@@ -1072,4 +1078,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _rc = main()
+    # 显式用 os._exit 跳过 QApplication 静态析构，避免 macos/ubuntu-py3.12
+    # 上 process exit 阶段的 Qt 段错误（selftest 本身所有断言已在此前完成）。
+    print("\n[exit] rc =", _rc)
+    os._exit(_rc)
